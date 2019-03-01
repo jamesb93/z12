@@ -1,24 +1,19 @@
 #include "z12.hpp"
-
+#include "dsp/digital.hpp"
+#include <limits>
 
 struct z12 : Module {
 	enum ParamIds {
-		PROB_1,
-		PROB_2,
-		PROB_3,
+		ENUMS(PROB, 8),
 		NUM_PARAMS
 	};
 	enum InputIds {
-		PROB_1_INPUT,
-		PROB_2_INPUT,
-		PROB_3_INPUT,
-		CLOCK_INPUT,
+		ENUMS(PROB_INPUT, 8), 
+		EXT_CLOCK_INPUT,
 		NUM_INPUTS
 	};
 	enum OutputIds {
-		PROB_1_OUTPUT,
-		PROB_2_OUTPUT,
-		PROB_3_OUTPUT,
+		ENUMS(PROB_OUTPUT, 8),
 		NUM_OUTPUTS
 	};
 	enum LightIds {
@@ -26,48 +21,104 @@ struct z12 : Module {
 		NUM_LIGHTS
 	};
 
-	float phase = 0.0;
-	float blinkPhase = 0.0;
+	SchmittTrigger clockTrigger;
+	PulseGenerator pulseGenerators[8];
+	float probArray[8] = {};
+	float overflowArray[8] = {};
+	bool change;
+	float probSum;
+	int switchOn;
+	double maxOverflow = -std::numeric_limits<double>::infinity();
+
+	// Interface Arrays
+
 
 	z12() : Module(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, NUM_LIGHTS) {}
 	void step() override;
-
-	// For more advanced Module features, read Rack's engine.hpp header file
-	// - toJson, fromJson: serialization of internal data
-	// - onSampleRateChange: event triggered by a change of sample rate
-	// - onReset, onRandomize, onCreate, onDelete: implements special behavior when user clicks these from the context menu
 };
 
-
 void z12::step() {
-	// Implement a simple sine oscillator
-	// float deltaTime = engineGetSampleTime();
+	if (inputs[EXT_CLOCK_INPUT].active) {
+		if (clockTrigger.process(inputs[EXT_CLOCK_INPUT].value)) {
+			
+			// These have to be here! Always reset the probSum and maxOverflow
+			maxOverflow = -std::numeric_limits<double>::infinity();
+			probSum = 0.0;
 
-	// Compute the sine output
-	outputs[PROB_1_OUTPUT].value = inputs[PROB_1_INPUT].value;
-	outputs[PROB_2_OUTPUT].value = inputs[PROB_2_INPUT].value;
-	outputs[PROB_3_OUTPUT].value = inputs[PROB_3_INPUT].value;
+			for (int i = 0; i < 8; i++) {
+				probSum += params[PROB + i].value; 
+			}
+
+			double normFactor = 1.0 / probSum;
+
+			// Stuff the params into an array mult by normFactor
+			for (int i = 0; i < 8; i++) {
+				probArray[i] = params[PROB + i].value * normFactor;
+			}
+
+			// Find Max index while adding the overflowArray + probArray
+			for (int i = 0; i < 8; i++) {
+				overflowArray[i] += probArray[i];
+			}
+			
+			for (int i = 0; i < 8; i++) {
+				if (overflowArray[i] > maxOverflow) {
+				maxOverflow = overflowArray[i];
+				switchOn = i;
+				}
+			}
+
+			// Trigger the corresponding pulseGenerator (each output has its own)
+			for (int i = 0; i < 8; i++) {
+				if (i == switchOn) {
+					pulseGenerators[i].trigger(1e-3f);
+				}
+			}
+			overflowArray[switchOn] -= 1.0;
+		}
+
+		for (int i = 0; i < 8; i++) {
+			outputs[PROB_OUTPUT + i].value = pulseGenerators[i].process(engineGetSampleTime()) ? 10.0f : 0.0f;
+		}
+	}
+}
 
 struct z12Widget : ModuleWidget {
 	z12Widget(z12 *module);
 };
 
 z12Widget::z12Widget(z12 *module) : ModuleWidget(module) {
-	setPanel(SVG::load(assetPlugin(plugin, "res/z12.svg")));
+	setPanel(SVG::load(assetPlugin(plugin, "res/z12_done.svg")));
 
-	// addParam(ParamWidget::create<Davies1900hBlackKnob>(Vec(28, 87), module, MyModule::PITCH_PARAM, -3.0, 3.0, 0.0));
+	// measurements in mm for ports
+    float panelWidth = 96.52f;
+    float margin = 5.0f;
+    float portWidth = 8.4666f;
+    float portsArea = panelWidth - (margin * 2.0f);
+    float horizontalStep = (portsArea - portWidth) / 7.0f;
+	float offset;
 
-	addInput(Port::create<PJ301MPort>(Vec(0, 186), Port::INPUT, module, z12::PROB_1_INPUT));
-	addInput(Port::create<PJ301MPort>(Vec(33, 186), Port::INPUT, module, z12::PROB_2_INPUT));
-	addInput(Port::create<PJ301MPort>(Vec(66, 186), Port::INPUT, module, z12::PROB_3_INPUT));
+	static const float knobPosX[8] = {4.053, 15.203, 26.354, 37.504, 48.655, 59.805, 70.956, 82.106};
+	
+    for (int i = 0; i < 8; i++) {
+		offset = mm2px(margin + (horizontalStep * i));
+        addInput(Port::create<PJ301MPort>(Vec(offset, 100), Port::INPUT, module, z12::PROB + i));
+    }
 
-	addOutput(Port::create<PJ301MPort>(Vec(0, 275), Port::OUTPUT, module, z12::PROB_1_OUTPUT));
-	addOutput(Port::create<PJ301MPort>(Vec(33, 275), Port::OUTPUT, module, z12::PROB_2_OUTPUT));
-	addOutput(Port::create<PJ301MPort>(Vec(66, 275), Port::OUTPUT, module, z12::PROB_3_OUTPUT));
+	// Knobs
+	for (int i = 0; i < 8; i++) {
+		offset = mm2px(knobPosX[i]);
+		addParam(ParamWidget::create<RoundBlackKnob>(Vec(offset, 200), module, z12::PROB + i, 0.0f, 1.0f, 0.5f));
+	}
+	
+	// z12 gate trigger outputs
+	for (int i = 0; i < 8; i++) {
+		offset = mm2px(margin + (horizontalStep * i));
+		addOutput(Port::create<PJ301MPort>(Vec(offset, 300), Port::OUTPUT, module, z12::PROB_OUTPUT + i));
+	}
+
+	// External Clock Input
+	addInput(Port::create<PJ301MPort>(Vec(20, 20), Port::INPUT, module, z12::EXT_CLOCK_INPUT));
 }
 
-// Specify the Module and ModuleWidget subclass, human-readable
-// author name for categorization per plugin, module slug (should never
-// change), human-readable module name, and any number of tags
-// (found in `include/tags.hpp`) separated by commas.
 Model *modelz12 = Model::create<z12, z12Widget>("Jaudio", "Jaudio", "z12", SEQUENCER_TAG);
