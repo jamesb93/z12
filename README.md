@@ -7,6 +7,8 @@ http://msp.ucsd.edu/Publications/seamus15.pdf
 
 The gist of it is a stochastic sequencer, containing 8 probabilistic outputs.
 
+I've used it here: https://harnessing.xyz/projects/stitch-strata/#demo2
+
 ### Parameters [8]
 
 8 probabilities, one for each gate.
